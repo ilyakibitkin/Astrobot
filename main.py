@@ -274,20 +274,21 @@ async def show_profile(chat_id, user_id, message_id=None):
 async def tribute_webhook(request):
     try:
         data = await request.json()
+        
+        # Отправляем все данные админу чтобы увидеть что приходит
+        await bot.send_message(
+            ADMIN_ID,
+            f"📨 <b>Данные от Tribute:</b>\n\n<code>{json.dumps(data, indent=2, ensure_ascii=False)}</code>",
+            parse_mode="HTML"
+        )
 
         if data.get("status") != "paid":
+            await bot.send_message(ADMIN_ID, f"⚠️ Статус не paid: {data.get('status')}")
             return web.Response(status=200)
 
         comment = str(data.get("comment", "")).strip()
         if not comment.isdigit():
-            await bot.send_message(
-                ADMIN_ID,
-                f"⚠️ <b>Tribute оплата без ID!</b>\n\n"
-                f"Комментарий: {comment}\n"
-                f"Сумма: {data.get('amount', '?')} ₽\n\n"
-                f"Выдайте ключ вручную: /give USER_ID",
-                parse_mode="HTML"
-            )
+            await bot.send_message(ADMIN_ID, f"⚠️ Комментарий не ID: '{comment}'")
             return web.Response(status=200)
 
         user_id = int(comment)
@@ -295,23 +296,13 @@ async def tribute_webhook(request):
         uid = str(user_id)
 
         if uid not in db:
-            await bot.send_message(
-                ADMIN_ID,
-                f"⚠️ <b>Tribute оплата — пользователь не найден!</b>\n\n"
-                f"ID: <code>{user_id}</code>\n"
-                f"Сумма: {data.get('amount', '?')} ₽",
-                parse_mode="HTML"
-            )
+            await bot.send_message(ADMIN_ID, f"⚠️ Пользователь {user_id} не найден в базе!")
             return web.Response(status=200)
 
         key_value, expires = set_subscription(user_id, days=30, source="tribute")
 
         if not key_value:
-            await bot.send_message(
-                user_id,
-                f"⚠️ Оплата прошла но свободных ключей нет!\n"
-                f"Напишите {SUPPORT_USERNAME} — разберёмся срочно."
-            )
+            await bot.send_message(ADMIN_ID, "⚠️ Нет свободных ключей!")
             return web.Response(status=200)
 
         await send_receipt(user_id, key_value, expires, source="tribute")
@@ -328,8 +319,9 @@ async def tribute_webhook(request):
         )
 
     except Exception as e:
-        print(f"Webhook error: {e}")
+        await bot.send_message(ADMIN_ID, f"❌ Ошибка webhook: {e}")
 
+    return web.Response(status=200)
     return web.Response(status=200)
 
 # ====== СТАРТ ======
