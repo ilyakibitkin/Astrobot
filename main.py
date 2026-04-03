@@ -13,7 +13,7 @@ from aiogram.filters import CommandStart
 
 # ====== КОНФИГ ======
 BOT_TOKEN = "8335279244:AAFMK4Ku9rmTmoL56FL2N8Zhe8EJYgw1pnc"
-TRIBUTE_LINK = "https://web.tribute.tg/d/I5p"
+TRIBUTE_LINK = "https://t.me/tribute/app?startapp=dI5p"
 TRIBUTE_API_KEY = "3287c474-3f61-4a29-b31a-e1ef71cc"
 SUPPORT_USERNAME = "@ВАШ_НИКНЕЙМ"
 ADMIN_ID = 8339239363
@@ -532,7 +532,7 @@ async def pay_tribute_callback(call: types.CallbackQuery):
     text = (
         "💳 <b>Оплата через СБП / Карту:</b>\n\n"
         f"1️⃣ Перейдите по ссылке и оплатите {PRICE_RUB} ₽:\n"
-        f"{TRIBUTE_LINK}?comment={user_id}\n\n"
+        f"{TRIBUTE_LINK}\n\n"
         "2️⃣ Ключ придёт автоматически после оплаты ✅"
     )
     await bot.edit_message_text(
