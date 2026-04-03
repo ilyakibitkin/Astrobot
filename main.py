@@ -3,6 +3,7 @@ import json
 import uuid
 from datetime import datetime, timedelta
 
+from aiohttp import web
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton,
@@ -13,10 +14,12 @@ from aiogram.filters import CommandStart
 # ====== КОНФИГ ======
 BOT_TOKEN = "8335279244:AAEl_ICWZzgmvY2kfL6HtJdmpBJHFzoftgw"
 TRIBUTE_LINK = "https://t.me/tribute/app?startapp=dI5p"
+TRIBUTE_API_KEY = "3287c474-3f61-4a29-b31a-e1ef71cc"
 SUPPORT_USERNAME = "@ВАШ_НИКНЕЙМ"
 ADMIN_ID = 8339239363
 STARS_AMOUNT = 1
 PRICE_RUB = 199
+WEBHOOK_HOST = "https://astrobot-production-6d6d.up.railway.app"
 DB_FILE = "users.json"
 KEYS_FILE = "keys.json"
 
@@ -48,16 +51,14 @@ def save_keys(data):
         json.dump(data, f, indent=2, ensure_ascii=False)
 
 def add_key(key_value):
-    """Добавить новый ключ в базу (вызывается командой /addkey)"""
     keys = load_keys()
-    # Проверяем что такого ключа ещё нет
     for k, v in keys.items():
         if v["key"] == key_value:
-            return False  # дубликат
+            return False
     key_id = str(uuid.uuid4())
     keys[key_id] = {
         "key": key_value,
-        "status": "free",      # free = свободен, used = занят
+        "status": "free",
         "user_id": None,
         "assigned_at": None
     }
@@ -65,7 +66,6 @@ def add_key(key_value):
     return True
 
 def get_free_key():
-    """Взять первый свободный ключ и пометить его как занятый"""
     keys = load_keys()
     for key_id, data in keys.items():
         if data["status"] == "free":
@@ -73,7 +73,6 @@ def get_free_key():
     return None, None
 
 def assign_key(key_id, user_id):
-    """Привязать ключ к пользователю"""
     keys = load_keys()
     if key_id in keys:
         keys[key_id]["status"] = "used"
@@ -82,7 +81,6 @@ def assign_key(key_id, user_id):
         save_keys(keys)
 
 def get_user_key(user_id):
-    """Получить ключ пользователя"""
     keys = load_keys()
     uid = str(user_id)
     for key_id, data in keys.items():
@@ -91,7 +89,6 @@ def get_user_key(user_id):
     return None
 
 def delete_key_by_user(user_id):
-    """Удалить ключ пользователя (когда подписка истекла)"""
     keys = load_keys()
     uid = str(user_id)
     to_delete = None
@@ -106,7 +103,6 @@ def delete_key_by_user(user_id):
     return False
 
 def count_free_keys():
-    """Сколько свободных ключей осталось"""
     keys = load_keys()
     return sum(1 for v in keys.values() if v["status"] == "free")
 
@@ -117,23 +113,21 @@ def create_user(user_id, name):
     if uid not in db:
         db[uid] = {
             "name": name,
+            "balance": 0,
             "subscription": None,
             "total_paid": 0
         }
         save_db(db)
 
 def set_subscription(user_id, days=30, source="stars"):
-    """Выдать пользователю свободный ключ из базы"""
     db = load_db()
     uid = str(user_id)
     if uid not in db:
         return None, None
 
-    # Проверяем есть ли уже ключ у пользователя
     existing_key = get_user_key(user_id)
 
     if existing_key:
-        # Продлеваем подписку — ключ остаётся тот же
         existing_sub = db[uid].get("subscription")
         if existing_sub:
             old_exp = datetime.fromisoformat(existing_sub["expires"])
@@ -142,7 +136,7 @@ def set_subscription(user_id, days=30, source="stars"):
             base = datetime.now()
         expires = base + timedelta(days=days)
         db[uid]["subscription"] = {
-        "key": existing_key,
+            "key": existing_key,
             "expires": expires.isoformat(),
             "source": source
         }
@@ -150,10 +144,9 @@ def set_subscription(user_id, days=30, source="stars"):
         save_db(db)
         return existing_key, expires
 
-    # Новый пользователь — берём свободный ключ
     key_id, key_value = get_free_key()
     if not key_value:
-        return None, None  # нет свободных ключей!
+        return None, None
 
     expires = datetime.now() + timedelta(days=days)
     assign_key(key_id, user_id)
@@ -277,6 +270,68 @@ async def show_profile(chat_id, user_id, message_id=None):
             parse_mode="HTML"
         )
 
+# ====== TRIBUTE WEBHOOK ======
+async def tribute_webhook(request):
+    try:
+        data = await request.json()
+
+        if data.get("status") != "paid":
+            return web.Response(status=200)
+
+        comment = str(data.get("comment", "")).strip()
+        if not comment.isdigit():
+            await bot.send_message(
+                ADMIN_ID,
+                f"⚠️ <b>Tribute оплата без ID!</b>\n\n"
+                f"Комментарий: {comment}\n"
+                f"Сумма: {data.get('amount', '?')} ₽\n\n"
+                f"Выдайте ключ вручную: /give USER_ID",
+                parse_mode="HTML"
+            )
+            return web.Response(status=200)
+
+        user_id = int(comment)
+        db = load_db()
+        uid = str(user_id)
+
+        if uid not in db:
+            await bot.send_message(
+                ADMIN_ID,
+                f"⚠️ <b>Tribute оплата — пользователь не найден!</b>\n\n"
+                f"ID: <code>{user_id}</code>\n"
+                f"Сумма: {data.get('amount', '?')} ₽",
+                parse_mode="HTML"
+            )
+            return web.Response(status=200)
+
+        key_value, expires = set_subscription(user_id, days=30, source="tribute")
+
+        if not key_value:
+            await bot.send_message(
+                user_id,
+                f"⚠️ Оплата прошла но свободных ключей нет!\n"
+                f"Напишите {SUPPORT_USERNAME} — разберёмся срочно."
+            )
+            return web.Response(status=200)
+
+        await send_receipt(user_id, key_value, expires, source="tribute")
+
+        user = get_user(user_id)
+        await bot.send_message(
+            ADMIN_ID,
+            f"💰 <b>Новая оплата Tribute!</b>\n\n"
+            f"👤 {user['name']} (ID: <code>{user_id}</code>)\n"
+            f"💳 Сумма: {data.get('amount', '?')} ₽\n"
+            f"📅 До: {expires.strftime('%d.%m.%Y %H:%M')}\n"
+            f"🔓 Осталось свободных: {count_free_keys()}",
+            parse_mode="HTML"
+        )
+
+    except Exception as e:
+        print(f"Webhook error: {e}")
+
+    return web.Response(status=200)
+
 # ====== СТАРТ ======
 @dp.message(CommandStart())
 async def start_command(message: types.Message):
@@ -390,7 +445,7 @@ async def buy_callback(call: types.CallbackQuery):
         await bot.edit_message_text(
             text=(
                 "😔 <b>Свободных мест нет.</b>\n\n"
-                f"Напишите {SUPPORT_USERNAME} — мы добавим вас в очередь."
+                f"Напишите {SUPPORT_USERNAME} — добавим вас в очередь."
             ),
             chat_id=call.message.chat.id,
             message_id=call.message.message_id,
@@ -443,7 +498,7 @@ async def pay_stars_callback(call: types.CallbackQuery):
 async def pre_checkout_handler(query: PreCheckoutQuery):
     await bot.answer_pre_checkout_query(query.id, ok=True)
 
-# ====== УСПЕШНАЯ ОПЛАТА ======
+# ====== УСПЕШНАЯ ОПЛАТА STARS ======
 @dp.message(F.successful_payment)
 async def successful_payment_handler(message: types.Message):
     user_id = message.from_user.id
@@ -452,9 +507,8 @@ async def successful_payment_handler(message: types.Message):
 
     if not key_value:
         await message.answer(
-            "⚠️ Оплата прошла но свободных ключей нет!\n"
-            f"Напишите {SUPPORT_USERNAME} — разберёмся срочно."
-        )
+            f"⚠️ Оплата прошла но свободных ключей нет!\n"
+            f"Напишите {SUPPORT_USERNAME} — разберёмся срочно.")
         return
 
     await send_receipt(message.chat.id, key_value, expires, stars_amount=stars, source="stars")
@@ -465,7 +519,6 @@ async def successful_payment_handler(message: types.Message):
         f"💰 <b>Новая оплата Stars!</b>\n\n"
         f"👤 {user['name']} (ID: <code>{user_id}</code>)\n"
         f"⭐ Stars: {stars}\n"
-        f"🔑 Ключ выдан\n"
         f"📅 До: {expires.strftime('%d.%m.%Y %H:%M')}\n"
         f"🔓 Осталось свободных: {count_free_keys()}",
         parse_mode="HTML"
@@ -474,12 +527,13 @@ async def successful_payment_handler(message: types.Message):
 # ====== ОПЛАТА TRIBUTE ======
 @dp.callback_query(F.data == "pay_tribute")
 async def pay_tribute_callback(call: types.CallbackQuery):
+    user_id = call.from_user.id
+    create_user(user_id, call.from_user.first_name or "Пользователь")
     text = (
         "💳 <b>Оплата через СБП / Карту:</b>\n\n"
         f"1️⃣ Перейдите по ссылке и оплатите {PRICE_RUB} ₽:\n"
-        f"{TRIBUTE_LINK}\n\n"
-        f"2️⃣ После оплаты напишите {SUPPORT_USERNAME}\n\n"
-        "3️⃣ Активируем ключ в течение часа ✅"
+        f"{TRIBUTE_LINK}?comment={user_id}\n\n"
+        "2️⃣ Ключ придёт автоматически после оплаты ✅"
     )
     await bot.edit_message_text(
         text=text, chat_id=call.message.chat.id,
@@ -502,7 +556,8 @@ async def admin_addkey(message: types.Message):
     if success:
         await message.answer(
             f"✅ Ключ добавлен в базу!\n"
-            f"🔓 Всего свободных: {count_free_keys()}",)
+            f"🔓 Всего свободных: {count_free_keys()}"
+        )
     else:
         await message.answer("❌ Такой ключ уже есть в базе.")
 
@@ -527,7 +582,7 @@ async def admin_give(message: types.Message):
     except (IndexError, ValueError):
         await message.answer("Использование: /give <user_id>")
 
-# ====== АДМИН: удалить ключ пользователя (подписка истекла) ======
+# ====== АДМИН: удалить ключ ======
 @dp.message(F.text.startswith("/revoke "))
 async def admin_revoke(message: types.Message):
     if message.from_user.id != ADMIN_ID:
@@ -541,7 +596,7 @@ async def admin_revoke(message: types.Message):
             save_db(db)
         delete_key_by_user(target_id)
         await message.answer(
-            f"✅ Ключ пользователя <code>{target_id}</code> удалён из базы.",
+            f"✅ Ключ пользователя <code>{target_id}</code> удалён.",
             parse_mode="HTML"
         )
         await bot.send_message(
@@ -604,7 +659,14 @@ async def any_message(message: types.Message):
 
 # ====== ЗАПУСК ======
 async def main():
+    app = web.Application()
+    app.router.add_post("/tribute/webhook", tribute_webhook)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", 8080)
+    await site.start()
     print("🤖 Бот запущен!")
+    print("🌐 Webhook сервер запущен на порту 8080")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
