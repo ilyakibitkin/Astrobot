@@ -357,35 +357,28 @@ async def tribute_webhook(request):
         data = await request.json()
         print(f"Tribute webhook: {data}")
 
-        # Чистим старые заявки
-        cleanup_pending()
-
-        status = data.get("status")
-        if status != "paid":
+        name = data.get("name")
+        if name != "new_donation":
             return web.Response(status=200)
 
-        # Получаем сумму из webhook
-        amount = data.get("amount")
-        if not amount:
-            return web.Response(status=200)
+        payload = data.get("payload", {})
+        amount = payload.get("amount", 0)
+        telegram_user_id = payload.get("telegram_user_id")
 
-        # Ищем заявку по сумме и времени
-        payment_id, pending_data = find_pending(amount)
-
-        if not pending_data:
-            # Заявка не найдена — уведомляем админа
+        if not telegram_user_id:
             await bot.send_message(
                 ADMIN_ID,
-                f"⚠️ <b>Tribute оплата без заявки!</b>\n\n"
-                f"Сумма: {amount} ₽\n"
-                f"Данные: {data}\n\n"
-                f"Выдайте ключ вручную: /give USER_ID",
+                f"⚠️ Оплата без Telegram ID!\nСумма: {amount/100} ₽",
                 parse_mode="HTML"
             )
             return web.Response(status=200)
 
-        user_id = int(pending_data["user_id"])
-        complete_pending(payment_id)
+        user_id = int(telegram_user_id)
+        db = load_db()
+        uid = str(user_id)
+
+        if uid not in db:
+            create_user(user_id, "Пользователь")
 
         key_value, expires = set_subscription(user_id, days=30, source="tribute")
 
@@ -404,7 +397,7 @@ async def tribute_webhook(request):
             ADMIN_ID,
             f"💰 <b>Новая оплата Tribute!</b>\n\n"
             f"👤 {user['name']} (ID: <code>{user_id}</code>)\n"
-            f"💳 Сумма: {amount} ₽\n"
+            f"💳 Сумма: {amount/100} ₽\n"
             f"📅 До: {expires.strftime('%d.%m.%Y %H:%M')}\n"
             f"🔓 Осталось свободных: {count_free_keys()}",
             parse_mode="HTML"
@@ -415,18 +408,6 @@ async def tribute_webhook(request):
         await bot.send_message(ADMIN_ID, f"❌ Ошибка webhook: {e}")
 
     return web.Response(status=200)
-
-# ====== СТАРТ ======
-@dp.message(CommandStart())
-async def start_command(message: types.Message):
-    create_user(message.from_user.id, message.from_user.first_name or "Пользователь")
-    await show_profile(message.chat.id, message.from_user.id)
-
-# ====== МЕНЮ ======
-@dp.callback_query(F.data == "menu")
-async def menu_callback(call: types.CallbackQuery):
-    await show_profile(call.message.chat.id, call.from_user.id, call.message.message_id)
-    await call.answer()
 
 # ====== МОЙ КЛЮЧ ======
 @dp.callback_query(F.data == "mykey")
