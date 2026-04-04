@@ -13,11 +13,11 @@ from aiogram.filters import CommandStart
 
 # ====== КОНФИГ ======
 
-BOT_TOKEN = “ВАШ_ТОКЕН”
+BOT_TOKEN = “8335279244:AAFMK4Ku9rmTmoL56FL2N8Zhe8EJYgw1pnc”
 TRIBUTE_LINK = “https://t.me/tribute/app?startapp=dI5p”
 SUPPORT_USERNAME = “@ВАШ_НИКНЕЙМ”
-ADMIN_ID = 123456789
-STARS_AMOUNT = 199
+ADMIN_ID = 8339239363
+STARS_AMOUNT = 1
 PRICE_RUB = 199
 DB_FILE = “users.json”
 KEYS_FILE = “keys.json”
@@ -815,5 +815,5 @@ print(“🤖 Бот запущен!”)
 print(“🌐 Webhook сервер запущен на порту 8080”)
 await dp.start_polling(bot)
 
-if **name** == “**main**”:
+if __name__ == “__main__”:
 asyncio.run(main())
