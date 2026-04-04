@@ -12,21 +12,20 @@ from aiogram.types import (
 from aiogram.filters import CommandStart
 
 # ====== КОНФИГ ======
-BOT_TOKEN = "8335279244:AAFMK4Ku9rmTmoL56FL2N8Zhe8EJYgw1pnc"
+BOT_TOKEN = "ВАШ_ТОКЕН"
 TRIBUTE_LINK = "https://t.me/tribute/app?startapp=dI5p"
-TRIBUTE_API_KEY = "3287c474-3f61-4a29-b31a-e1ef71cc"
 SUPPORT_USERNAME = "@ВАШ_НИКНЕЙМ"
-ADMIN_ID = 8339239363
-STARS_AMOUNT = 1
+ADMIN_ID = 123456789
+STARS_AMOUNT = 199
 PRICE_RUB = 199
-WEBHOOK_HOST = "https://astrobot-production-6d6d.up.railway.app"
 DB_FILE = "users.json"
 KEYS_FILE = "keys.json"
+PENDING_FILE = "pending.json"  # заявки ожидающие оплаты
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# ====== БАЗА ПОЛЬЗОВАТЕЛЕЙ ======
+# ====== БАЗА ДАННЫХ ======
 def load_db():
     try:
         with open(DB_FILE, "r", encoding="utf-8") as f:
@@ -38,7 +37,6 @@ def save_db(data):
     with open(DB_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
 
-# ====== БАЗА КЛЮЧЕЙ ======
 def load_keys():
     try:
         with open(KEYS_FILE, "r", encoding="utf-8") as f:
@@ -50,6 +48,82 @@ def save_keys(data):
     with open(KEYS_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
 
+def load_pending():
+    try:
+        with open(PENDING_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+def save_pending(data):
+    with open(PENDING_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+
+# ====== ЗАЯВКИ ======
+def create_pending(user_id, amount):
+    """Создать заявку на оплату"""
+    pending = load_pending()
+    # Удаляем старые заявки этого пользователя
+    to_delete = [k for k, v in pending.items() if v["user_id"] == str(user_id)]
+    for k in to_delete:
+        del pending[k]
+    
+    payment_id = str(uuid.uuid4())
+    pending[payment_id] = {
+        "user_id": str(user_id),
+        "amount": amount,
+        "created_at": datetime.now().isoformat(),
+        "status": "waiting"
+    }
+    save_pending(pending)
+    return payment_id
+
+def find_pending(amount):
+    """Найти заявку по сумме и времени (не старше 30 минут)"""
+    pending = load_pending()
+    now = datetime.now()
+    candidates = []
+    
+    for payment_id, data in pending.items():
+        if data["status"] != "waiting":
+            continue
+        if data["amount"] != amount:
+            continue
+        created = datetime.fromisoformat(data["created_at"])
+        # Заявка не старше 30 минут
+        if (now - created).seconds > 1800:
+            continue
+        candidates.append((payment_id, data, created))
+    
+    if not candidates:
+        return None, None
+    
+    # Берём самую свежую заявку
+    candidates.sort(key=lambda x: x[2], reverse=True)
+    payment_id, data, _ = candidates[0]
+    return payment_id, data
+
+def complete_pending(payment_id):
+    """Пометить заявку как выполненную"""
+    pending = load_pending()
+    if payment_id in pending:
+        pending[payment_id]["status"] = "completed"
+        save_pending(pending)
+
+def cleanup_pending():
+    """Удалить старые заявки (старше 1 часа)"""
+    pending = load_pending()
+    now = datetime.now()
+    to_delete = []
+    for payment_id, data in pending.items():
+        created = datetime.fromisoformat(data["created_at"])
+        if (now - created).seconds > 3600:
+            to_delete.append(payment_id)
+    for k in to_delete:
+        del pending[k]
+    save_pending(pending)
+
+# ====== КЛЮЧИ ======
 def add_key(key_value):
     keys = load_keys()
     for k, v in keys.items():
@@ -209,6 +283,13 @@ def buy_menu():
         [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu")]
     ])
 
+def confirm_tribute_menu():
+    """Кнопка после создания заявки"""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Я оплатил", callback_data="tribute_check")],
+        [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu")]
+    ])
+
 # ====== ЧЕК ======
 async def send_receipt(chat_id, key_value, expires, stars_amount=None, source="stars"):
     if source == "stars":
@@ -274,35 +355,46 @@ async def show_profile(chat_id, user_id, message_id=None):
 async def tribute_webhook(request):
     try:
         data = await request.json()
-        
-        # Отправляем все данные админу чтобы увидеть что приходит
-        await bot.send_message(
-            ADMIN_ID,
-            f"📨 <b>Данные от Tribute:</b>\n\n<code>{json.dumps(data, indent=2, ensure_ascii=False)}</code>",
-            parse_mode="HTML"
-        )
+        print(f"Tribute webhook: {data}")
 
-        if data.get("status") != "paid":
-            await bot.send_message(ADMIN_ID, f"⚠️ Статус не paid: {data.get('status')}")
+        # Чистим старые заявки
+        cleanup_pending()
+
+        status = data.get("status")
+        if status != "paid":
             return web.Response(status=200)
 
-        comment = str(data.get("comment", "")).strip()
-        if not comment.isdigit():
-            await bot.send_message(ADMIN_ID, f"⚠️ Комментарий не ID: '{comment}'")
+        # Получаем сумму из webhook
+        amount = data.get("amount")
+        if not amount:
             return web.Response(status=200)
 
-        user_id = int(comment)
-        db = load_db()
-        uid = str(user_id)
+        # Ищем заявку по сумме и времени
+        payment_id, pending_data = find_pending(amount)
 
-        if uid not in db:
-            await bot.send_message(ADMIN_ID, f"⚠️ Пользователь {user_id} не найден в базе!")
+        if not pending_data:
+            # Заявка не найдена — уведомляем админа
+            await bot.send_message(
+                ADMIN_ID,
+                f"⚠️ <b>Tribute оплата без заявки!</b>\n\n"
+                f"Сумма: {amount} ₽\n"
+                f"Данные: {data}\n\n"
+                f"Выдайте ключ вручную: /give USER_ID",
+                parse_mode="HTML"
+            )
             return web.Response(status=200)
+
+        user_id = int(pending_data["user_id"])
+        complete_pending(payment_id)
 
         key_value, expires = set_subscription(user_id, days=30, source="tribute")
 
         if not key_value:
-            await bot.send_message(ADMIN_ID, "⚠️ Нет свободных ключей!")
+            await bot.send_message(
+                user_id,
+                f"⚠️ Оплата прошла но свободных ключей нет!\n"
+                f"Напишите {SUPPORT_USERNAME}"
+            )
             return web.Response(status=200)
 
         await send_receipt(user_id, key_value, expires, source="tribute")
@@ -312,16 +404,16 @@ async def tribute_webhook(request):
             ADMIN_ID,
             f"💰 <b>Новая оплата Tribute!</b>\n\n"
             f"👤 {user['name']} (ID: <code>{user_id}</code>)\n"
-            f"💳 Сумма: {data.get('amount', '?')} ₽\n"
+            f"💳 Сумма: {amount} ₽\n"
             f"📅 До: {expires.strftime('%d.%m.%Y %H:%M')}\n"
             f"🔓 Осталось свободных: {count_free_keys()}",
             parse_mode="HTML"
         )
 
     except Exception as e:
+        print(f"Webhook error: {e}")
         await bot.send_message(ADMIN_ID, f"❌ Ошибка webhook: {e}")
 
-    return web.Response(status=200)
     return web.Response(status=200)
 
 # ====== СТАРТ ======
@@ -500,7 +592,8 @@ async def successful_payment_handler(message: types.Message):
     if not key_value:
         await message.answer(
             f"⚠️ Оплата прошла но свободных ключей нет!\n"
-            f"Напишите {SUPPORT_USERNAME} — разберёмся срочно.")
+            f"Напишите {SUPPORT_USERNAME}"
+        )
         return
 
     await send_receipt(message.chat.id, key_value, expires, stars_amount=stars, source="stars")
@@ -521,18 +614,57 @@ async def successful_payment_handler(message: types.Message):
 async def pay_tribute_callback(call: types.CallbackQuery):
     user_id = call.from_user.id
     create_user(user_id, call.from_user.first_name or "Пользователь")
+
+    # Создаём заявку
+    create_pending(user_id, PRICE_RUB)
+
     text = (
         "💳 <b>Оплата через СБП / Карту:</b>\n\n"
         f"1️⃣ Перейдите по ссылке и оплатите {PRICE_RUB} ₽:\n"
         f"{TRIBUTE_LINK}\n\n"
-        "2️⃣ Ключ придёт автоматически после оплаты ✅"
+        "2️⃣ После оплаты нажмите кнопку <b>✅ Я оплатил</b>\n\n"
+        "⏱ Ключ выдаётся автоматически в течение минуты"
     )
     await bot.edit_message_text(
         text=text, chat_id=call.message.chat.id,
         message_id=call.message.message_id,
-        reply_markup=back_to_menu(),
+        reply_markup=confirm_tribute_menu(),
         parse_mode="HTML"
     )
+    await call.answer()
+
+# ====== ПРОВЕРКА ОПЛАТЫ TRIBUTE ======
+@dp.callback_query(F.data == "tribute_check")
+async def tribute_check_callback(call: types.CallbackQuery):
+    user_id = call.from_user.id
+    active_sub = get_active_subscription(user_id)
+
+    if active_sub:
+        exp = datetime.fromisoformat(active_sub["expires"])
+        await bot.edit_message_text(
+            text=(
+                "✅ <b>Оплата подтверждена!</b>\n\n"
+                f"Ваш ключ уже выдан.\n"
+                f"Подписка до: {exp.strftime('%d.%m.%Y %H:%M')}\n\n"
+                "Нажмите 🔑 Мой ключ чтобы скопировать."
+            ),
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            reply_markup=main_menu(),
+            parse_mode="HTML"
+        )
+    else:
+        await bot.edit_message_text(
+            text=(
+                "⏳ <b>Оплата ещё не подтверждена.</b>\n\n"
+                "Подождите 1-2 минуты и нажмите снова.\n\n"
+                f"Если проблема — напишите {SUPPORT_USERNAME}"
+            ),
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            reply_markup=confirm_tribute_menu(),
+            parse_mode="HTML"
+        )
     await call.answer()
 
 # ====== АДМИН: добавить ключ ======
@@ -547,11 +679,11 @@ async def admin_addkey(message: types.Message):
     success = add_key(key_value)
     if success:
         await message.answer(
-            f"✅ Ключ добавлен в базу!\n"
-            f"🔓 Всего свободных: {count_free_keys()}"
+            f"✅ Ключ добавлен!\n"
+            f"🔓 Свободных: {count_free_keys()}"
         )
     else:
-        await message.answer("❌ Такой ключ уже есть в базе.")
+        await message.answer("❌ Такой ключ уже есть.")
 
 # ====== АДМИН: выдать ключ вручную ======
 @dp.message(F.text.startswith("/give "))
@@ -566,9 +698,8 @@ async def admin_give(message: types.Message):
             return
         await send_receipt(target_id, key_value, expires, source="manual")
         await message.answer(
-            f"✅ Ключ выдан пользователю <code>{target_id}</code>\n"
-            f"📅 До: {expires.strftime('%d.%m.%Y %H:%M')}\n"
-            f"🔓 Осталось свободных: {count_free_keys()}",
+            f"✅ Ключ выдан <code>{target_id}</code>\n"
+            f"📅 До: {expires.strftime('%d.%m.%Y %H:%M')}",
             parse_mode="HTML"
         )
     except (IndexError, ValueError):
@@ -588,7 +719,7 @@ async def admin_revoke(message: types.Message):
             save_db(db)
         delete_key_by_user(target_id)
         await message.answer(
-            f"✅ Ключ пользователя <code>{target_id}</code> удалён.",
+            f"✅ Ключ <code>{target_id}</code> удалён.",
             parse_mode="HTML"
         )
         await bot.send_message(
@@ -603,7 +734,7 @@ async def admin_revoke(message: types.Message):
     except (IndexError, ValueError):
         await message.answer("Использование: /revoke <user_id>")
 
-# ====== АДМИН: список ключей ======
+# ====== АДМИН: ключи ======
 @dp.message(F.text == "/keys")
 async def admin_keys(message: types.Message):
     if message.from_user.id != ADMIN_ID:
@@ -622,13 +753,13 @@ async def admin_keys(message: types.Message):
     )
     await message.answer(text, parse_mode="HTML")
 
-# ====== АДМИН: список пользователей ======
+# ====== АДМИН: пользователи ======
 @dp.message(F.text == "/users")
 async def admin_users(message: types.Message):
     if message.from_user.id != ADMIN_ID:
         return
     db = load_db()
-    now = datetime.now(
+    now = datetime.now()
     active_count = 0
     text = "👥 <b>Пользователи:</b>\n\n"
     for uid, user in db.items():
